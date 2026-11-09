@@ -1,0 +1,71 @@
+# One command: `docker compose up --build`
+#   postgres + localstack (SQS) → one-shot migrate (schema + queues) → 3 API instances.
+# Three replicas share the same database and queues: this is the multi-instance deployment the
+# design is validated against. Ports 3001-3003.
+x-api: &api
+  build: .
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+  environment: &api-env
+    DATABASE_URL: postgres://wagering:wagering@postgres:5432/wagering
+    AWS_REGION: us-east-1
+    AWS_ENDPOINT_URL: http://localstack:4566
+    AWS_ACCESS_KEY_ID: test
+    AWS_SECRET_ACCESS_KEY: test
+    PORT: "3000"
+  stop_grace_period: 30s   # > SHUTDOWN_GRACE_MS so SIGTERM can drain before SIGKILL
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: wagering
+      POSTGRES_PASSWORD: wagering
+      POSTGRES_DB: wagering
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wagering -d wagering"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  localstack:
+    image: localstack/localstack:3.8.1
+    environment:
+      SERVICES: sqs
+    ports:
+      - "4566:4566"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health | grep -q '\"sqs\": \"\\(running\\|available\\)\"'"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  migrate:
+    build: .
+    command: ["bun", "run", "scripts/migrate.ts", "up"]
+    environment: *api-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    restart: "no"
+
+  api-1:
+    <<: *api
+    ports: ["3001:3000"]
+  api-2:
+    <<: *api
+    ports: ["3002:3000"]
+  api-3:
+    <<: *api
+    ports: ["3003:3000"]
+
+volumes:
+  pgdata:
